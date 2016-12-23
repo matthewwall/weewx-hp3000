@@ -354,12 +354,13 @@ set interval command (0x40)
 # FIXME: verify encoding of negative timezone offsets
 
 from __future__ import with_statement
+import Queue
 import syslog
+import threading
 import time
 import usb
 
 import weewx.drivers
-from weeutil.weeutil import timestamp_to_string, log_traceback
 
 DRIVER_NAME = 'WS3000'
 DRIVER_VERSION = '0.1'
@@ -372,7 +373,8 @@ def confeditor_loader():
 
 
 def logmsg(level, msg):
-    syslog.syslog(level, 'ws3000: %s' % msg)
+    syslog.syslog(level, 'ws3000: %s: %s' %
+                  (threading.currentThread().getName(), msg))
 
 def logdbg(msg):
     logmsg(syslog.LOG_DEBUG, msg)
@@ -384,7 +386,6 @@ def logerr(msg):
     logmsg(syslog.LOG_ERR, msg)
 
 
-#' '.join(["%0.2X" % ord(c) for c in buf]))
 def _fmt(buf):
     if buf:
         return "%s (len=%s)" % (' '.join(["%02x" % x for x in buf]), len(buf))
@@ -407,14 +408,42 @@ class WS3000ConfigurationEditor(weewx.drivers.AbstractConfEditor):
 
 
 class WS3000Driver(weewx.drivers.AbstractDevice):
+
+    DEFAULT_MAP = {
+        'inTemp': 't_1',
+        'inHumidity': 'h_1',
+        'outTemp': 't_2',
+        'outHumidity': 'h_2',
+        'extraTemp1': 't_3',
+        'extraHumid1': 'h_3',
+        'extraTemp2': 't_4',
+        'extraHumid2': 'h_4',
+        'extraTemp3': 't_5',
+        'extraHumid3': 'h_5',
+        'extraTemp4': 't_6',
+        'extraHumid4': 'h_6',
+        'extraTemp5': 't_7',
+        'extraHumid5': 'h_7',
+        'extraTemp6': 't_8',
+        'extraHumid6': 'h_8'}
+
     def __init__(self, **stn_dict):
         loginf('driver version is %s' % DRIVER_VERSION)
         loginf('usb info: %s' % get_usb_info())
         self._model = stn_dict.get('model', 'WS3000')
+        self._sensor_map = stn_dict.get('sensor_map', WS3000Driver.DEFAULT_MAP)
+        loginf('sensor map: %s' % self._sensor_map)
         self._station = WS3000Station()
         self._station.open()
+        self._queue = Queue.Queue()
+        self._thread = WS3000Thread(self._station, self._queue)
+        self._thread.start()
 
     def closePort(self):
+        if self._thread:
+            self._thread.running = False
+            self._thread.join()
+            self._thread = None
         self._station.close()
 
     def hardware_name(self):
@@ -422,12 +451,41 @@ class WS3000Driver(weewx.drivers.AbstractDevice):
 
     def genLoopPackets(self):
         while True:
-            pass
+            try:
+                data = self._queue.get(True, 10)
+                logdbg('data: %s' % data)
+                if data.get('type') == 'sensor_values':
+                    pkt = self._data_to_packet(data)
+                    logdbg('packet: %s' % pkt)
+                    yield pkt
+            except Queue.Empty:
+                logdbg('empty queue')
 
     def _data_to_packet(self, data):
         # map sensor data to database fields
         pkt = {'dateTime': int(time.time() + 0.5), 'usUnits': weewx.METRICWX}
+        for x in self._sensor_map:
+            if self._sensor_map[x] in data:
+                pkt[x] = data[self._sensor_map[x]]
         return pkt
+
+
+class WS3000Thread(threading.Thread):
+    def __init__(self, station, queue):
+        threading.Thread.__init__(self)
+        self.name = 'data-thread'
+        self.station = station
+        self.queue = queue
+        self.running = False
+
+    def run(self):
+        self.running = True
+        self.station.open()
+        while self.running:
+            raw = self.station.get_data()
+            if raw:
+                self.queue.put(raw)
+        self.station.close()
 
 
 class USBHID(object):
@@ -488,8 +546,6 @@ class USBHID(object):
         # use a usb reset to restore communication with the station.
         # specific cases include when you do an interrupt write with bogus
         # data.  use a reset to bring the station back to responsiveness.
-        # unfortunately it is not immediate.  sometimes it takes one reset.
-        # sometimes it takes multiple resets.
         for x in range(5):
             try:
                 self.devh.reset()
@@ -551,24 +607,181 @@ class WS3000Station(object):
             self.USB_ENDPOINT_OUT, buf, self.timeout)
         if cnt != len(buf):
             raise weewx.WeeWxIOError('write: bad write length: '
-                                     '%s != %s (%s)' %
-                                     (cnt, len(buf), _fmt(buf)))
+                                     '%s != %s' % (cnt, len(buf)))
 
-    def _read(self):
+    def _read(self, timeout=None):
+        if timeout is None:
+            timeout = self.timeout
         buf = self.devh.interruptRead(
             self.USB_ENDPOINT_IN,
             self.USB_PACKET_SIZE,
-            self.timeout)
+            timeout)
         if not buf:
             return None
-        logdbg("read: buf: %s" % _fmt(buf))
+        logdbg("read: %s" % _fmt(buf))
         if len(buf) != 64:
             raise weewx.WeeWxIOError('read: bad buffer length: '
                                      '%s != 64' % len(buf))
         if buf[0] != 0x7b:
             raise weewx.WeeWxIOError('read: bad first byte: '
                                      '0x%02x != 0x7b' % buf[0])
-        return buf
+        idx = None
+        try:
+            i = buf.index(0x40)
+            if buf[i + 1] == 0x7d:
+                idx = i
+        except ValueError, IndexError:
+            pass
+        if idx is None:
+            raise weewx.WeeWxIOError('read: no terminating bytes in buffer: '
+                                     '%s' % _fmt(buf))
+        return buf[0: idx]
+
+    def send_cmd(self, cmd):
+        self._write([0x7b, cmd, 0x40, 0x7d])
+
+    def send_06(self):
+        self.send_cmd(0x06)
+
+    def send_08(self):
+        self.send_cmd(0x08)
+
+    def send_09(self):
+        self.send_cmd(0x09)
+
+    def send_05(self):
+        self.send_cmd(0x05)
+
+    def send_03(self):
+        self.send_cmd(0x03)
+
+    def send_04(self):
+        self.send_cmd(0x04)
+
+    def send_41(self):
+        self.send_cmd(0x41)
+
+    def send_sequence(self):
+        self.send_06()
+        self.send_08()
+        self.send_09()
+        self.send_05()
+        self.send_03()
+        self.send_04()
+        self.send_41()
+
+    def recv(self):
+        return self._read(timeout=100)
+
+    @staticmethod
+    def raw_to_pkt(buf):
+        logdbg("raw: %s" % _fmt(buf))
+        pkt = dict()
+        if len(buf) == 4: # archive interval
+            pkt['type'] = 'interval'
+            pkt['interval'] = buf[1]
+        elif len(buf) == 30: # configuration
+            pkt['type'] = 'configuration'
+            pkt['graph_type'] = WS3000Station.decode_graph_type(buf[1])
+            pkt['graph_hours'] = buf[2]
+            pkt['time_format'] = WS3000Station.decode_time_format(buf[3])
+            pkt['date_format'] = WS3000Station.decode_date_format(buf[4])
+            pkt['dst'] = WS3000Station.decode_dst(buf[5])
+            pkt['timezone'] = WS3000Station.decode_timezone(buf[6])
+            pkt['units'] = WS3000Station.decode_units(buf[7])
+            pkt['area1'] = buf[11]
+            pkt['area2'] = buf[15]
+            pkt['area3'] = buf[19]
+            pkt['area4'] = buf[23]
+            pkt['area5'] = buf[27]
+        elif len(buf) == 19: # humidity alarm
+            pkt['type'] = 'alarm_humidity'
+            for ch in range(8):
+                idx = 1 + ch * 2
+                pkt['hhi_%s' % ch] = buf[idx]
+                pkt['hlo_%s' % ch] = buf[idx + 1]
+        elif len(buf) == 35: # temperature alarm
+            pkt['type'] = 'alarm_temperature'
+            for ch in range(8):
+                idx = 1 + ch * 4
+                pkt['thi_%s' % ch] = (buf[idx] * 256 + buf[idx + 1]) / 10.0
+                pkt['tlo_%s' % ch] = (buf[idx + 2] * 256 + buf[idx + 3]) / 10.0
+        elif len(buf) == 27: # sensor calibration
+            pkt['type'] = 'sensor_calibration'
+            for ch in range(8):
+                idx = 1 + ch * 3
+                pkt['tc_%s' % ch] = (buf[idx] * 256 + buf[idx + 1]) / 10.0
+                pkt['hc_%s' % ch] = buf[idx + 2]
+        elif len(buf) == 27: # sensor values
+            pkt['type'] = 'sensor_values'
+            for ch in range(8):
+                idx = 1 + ch * 3
+                t = None
+                if buf[idx] != 0x7f and buf[idx + 1] != 0xff:
+                    t = (buf[idx] * 256 + buf[idx + 1]) / 10.0
+                pkt['t_%s' % ch] = t
+                h = None
+                if buf[idx + 2] != 0xff:
+                    h = buf[idx + 2]
+                pkt['h_%s' % ch] = h
+        else:
+            logdbg("unknown data: %s" % _fmt(buf))
+        logdbg("pkt: %s" % pkt)
+        return pkt
+
+    @staticmethod
+    def decode_graph_type(x):
+        if x == 0:
+            return 'temperature'
+        elif x == 1:
+            return 'humidity'
+        elif x == 2:
+            return 'dewpoint'
+        elif x == 3:
+            return 'heatindex'
+        return None
+
+    @staticmethod
+    def decode_time_format(x):
+        if x == 0:
+            return 'h:mm:ss'
+        elif x == 1:
+            return 'AM h:mm:ss'
+        elif x == 2:
+            return 'h:mm:ss AM'
+        return None
+
+    @staticmethod
+    def decode_date_format(x):
+        if x == 0:
+            return 'dd-mm-yyyy'
+        elif x == 1:
+            return 'mm-dd-yyyy'
+        elif x == 2:
+            return 'yyyy-mm-dd'
+        return None
+
+    @staticmethod
+    def decode_dst(x):
+        if x == 0:
+            return 'off'
+        elif x == 1:
+            return 'on'
+        return None
+
+    @staticmethod
+    def decode_timezone(x):
+        if (x & 0xf0) == 0xf0:
+            return x - 0x100
+        return x
+
+    @staticmethod
+    def decode_units(x):
+        if x == 0:
+            return 'degree_C'
+        elif x == 1:
+            return 'degree_F'
+        return None
 
 
 # define a main entry point for basic testing of the station.  invoke this as
@@ -599,5 +812,17 @@ if __name__ == '__main__':
         syslog.setlogmask(syslog.LOG_UPTO(syslog.LOG_DEBUG))
 
     with WS3000Station() as s:
-        raw = s.get_current()
-        print raw
+        queue = Queue.Queue()
+        t = WS3000Thread()
+        t.listen(s, queue)
+        while True:
+            try:
+                raw = queue.get(True, 10)
+                print "raw: %s" % raw
+                pkt = WS3000Station.raw_to_pkt(raw)
+                print "pkt: %s" % pkt
+            except Queue.Empty:
+                pass
+            except KeyboardInterrupt:
+                break
+        t.stop_listening()
