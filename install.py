@@ -1,5 +1,6 @@
 # installer for ws3000 driver
 # Copyright 2016 Matthew Wall
+# Distributed under the terms of the GNU Public License (GPLv3)
 
 from setup import ExtensionInstaller
 
@@ -9,7 +10,7 @@ def loader():
 class WS3000Installer(ExtensionInstaller):
     def __init__(self):
         super(WS3000Installer, self).__init__(
-            version="0.1",
+            version="0.2",
             name='ws3000',
             description='Collect data from WS-3000 T/H sensors',
             author="Matthew Wall",

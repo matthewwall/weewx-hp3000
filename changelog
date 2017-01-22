@@ -1,2 +1,5 @@
+0.2 22jan2017
+* user-specified map augments the default instead of replacing it
+
 0.1 22dec2016
 * initial release

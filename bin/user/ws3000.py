@@ -1,6 +1,6 @@
 #!/usr/bin/env python
-# Copyright 2016 Matthew Wall, all rights reserved
-# Distributed under the terms of the GPLv3
+# Copyright 2016 Matthew Wall
+# Distributed under the terms of the GNU Public License (GPLv3)
 
 """
 Collect data from the WS-3000 console via USB.
@@ -363,7 +363,7 @@ import usb
 import weewx.drivers
 
 DRIVER_NAME = 'WS3000'
-DRIVER_VERSION = '0.1'
+DRIVER_VERSION = '0.2'
 
 def loader(config_dict, _):
     return WS3000Driver(**config_dict[DRIVER_NAME])
@@ -431,7 +431,9 @@ class WS3000Driver(weewx.drivers.AbstractDevice):
         loginf('driver version is %s' % DRIVER_VERSION)
         loginf('usb info: %s' % get_usb_info())
         self._model = stn_dict.get('model', 'WS3000')
-        self._sensor_map = stn_dict.get('sensor_map', WS3000Driver.DEFAULT_MAP)
+        self._sensor_map = dict(WS3000Driver.DEFAULT_MAP)
+        if 'sensor_map' in stn_dict:
+            self._sensor_map.update(stn_dict['sensor_map'])
         loginf('sensor map: %s' % self._sensor_map)
         self._station = WS3000Station()
         self._station.open()
