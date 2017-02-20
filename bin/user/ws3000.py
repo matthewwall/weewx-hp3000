@@ -358,12 +358,12 @@ import Queue
 import syslog
 import threading
 import time
-import usb
 
+import weeusb
 import weewx.drivers
 
 DRIVER_NAME = 'WS3000'
-DRIVER_VERSION = '0.2'
+DRIVER_VERSION = '0.3'
 
 def loader(config_dict, _):
     return WS3000Driver(**config_dict[DRIVER_NAME])
@@ -429,16 +429,14 @@ class WS3000Driver(weewx.drivers.AbstractDevice):
 
     def __init__(self, **stn_dict):
         loginf('driver version is %s' % DRIVER_VERSION)
-        loginf('usb info: %s' % get_usb_info())
+        loginf('usb info: %s' % weeusb.USBHID.get_usb_info())
         self._model = stn_dict.get('model', 'WS3000')
         self._sensor_map = dict(WS3000Driver.DEFAULT_MAP)
         if 'sensor_map' in stn_dict:
             self._sensor_map.update(stn_dict['sensor_map'])
         loginf('sensor map: %s' % self._sensor_map)
-        self._station = WS3000Station()
-        self._station.open()
         self._queue = Queue.Queue()
-        self._thread = WS3000Thread(self._station, self._queue)
+        self._thread = WS3000Thread(self._queue)
         self._thread.start()
 
     def closePort(self):
@@ -446,7 +444,6 @@ class WS3000Driver(weewx.drivers.AbstractDevice):
             self._thread.running = False
             self._thread.join()
             self._thread = None
-        self._station.close()
 
     def hardware_name(self):
         return self._model
@@ -473,151 +470,47 @@ class WS3000Driver(weewx.drivers.AbstractDevice):
 
 
 class WS3000Thread(threading.Thread):
-    def __init__(self, station, queue):
+    def __init__(self, queue):
         threading.Thread.__init__(self)
         self.name = 'data-thread'
-        self.station = station
         self.queue = queue
         self.running = False
 
     def run(self):
         self.running = True
-        self.station.open()
         while self.running:
-            raw = self.station.get_data()
-            if raw:
-                self.queue.put(raw)
-        self.station.close()
-
-
-class USBHID(object):
-    def __init__(self, vendor_id, product_id, iface=0, timeout=1000):
-        self.vendor_id = vendor_id
-        self.product_id = product_id
-        self.iface = iface
-        self.timeout = timeout
-        self.devh = None
-
-    def __enter__(self):
-        self.open()
-        return self
-
-    def __exit__(self, _, value, traceback):
-        self.close()
-
-    def open(self):
-        dev = self._find_dev(self.vendor_id, self.product_id)
-        if not dev:
-            logerr("Cannot find USB device with VendorID=0x%04x ProductID=0x%04x" % (self.vendor_id, self.product_id))
-            raise weewx.WeeWxIOError('Unable to find station on USB')
-
-        self.devh = dev.open()
-        if not self.devh:
-            raise weewx.WeeWxIOError('Open USB device failed')
-
-        # be sure kernel does not claim the interface on linux systems
-        try:
-            self.devh.detachKernelDriver(self.iface)
-        except (AttributeError, usb.USBError):
-            pass
-
-        # attempt to claim the interface
-        try:
-            self.devh.claimInterface(self.iface)
-            self.devh.setAltInterface(self.iface)
-        except usb.USBError, e:
-            self.close()
-            logerr("Unable to claim USB interface %s: %s" % (self.iface, e))
-            raise weewx.WeeWxIOError(e)
-
-    def close(self):
-        if self.devh:
             try:
-                self.devh.releaseInterface()
-            except (ValueError, usb.USBError), e:
-                logerr("release interface failed: %s" % e)
-            self.devh = None
-
-    def _write(self, buf):
-        pass
-
-    def _read(self):
-        return None
-
-    def _reset(self):
-        # use a usb reset to restore communication with the station.
-        # specific cases include when you do an interrupt write with bogus
-        # data.  use a reset to bring the station back to responsiveness.
-        for x in range(5):
-            try:
-                self.devh.reset()
-                break
-            except usb.USBError, e:
-                logdbg("usb reset failed: %s" % e)
-                time.sleep(2)
-
-    @staticmethod
-    def _find_dev(vendor_id, product_id):
-        """Find the vendor and product ID on the USB."""
-        for bus in usb.busses():
-            for dev in bus.devices:
-                if dev.idVendor == vendor_id and dev.idProduct == product_id:
-                    loginf('Found device on USB bus=%s device=%s' %
-                           (bus.dirname, dev.filename))
-                    return dev
-        return None
-
-    KNOWN_USB_MESSAGES = [
-        'No data available', 'No error',
-        'Nessun dato disponibile', 'Nessun errore',
-        'Keine Daten verfügbar',
-        'No hay datos disponibles',
-        'Pas de données disponibles'
-        ]
-
-    # these are the usb 'errors' that should be ignored
-    @staticmethod
-    def known_usb_err(e):
-        errmsg = repr(e)
-        for msg in USBHID.KNOWN_USB_MESSAGES:
-            if msg in errmsg:
-                return True
-        return False
-
-    @staticmethod
-    def get_usb_info():
-        pyusb_version = '0.4.x'
-        try:
-            pyusb_version = usb.__version__
-        except AttributeError:
-            pass
-        return "pyusb_version=%s" % pyusb_version
+                with WS3000Station() as s:
+                    while self.running:
+                        try:
+                            s.send_sequence() # FIXME: do this periodically
+                            raw = s.recv()
+                            pkt = WS3000Station.raw_to_pkt(raw)
+                            if pkt:
+                                self.queue.put(pkt)
+                        except weewx.WeeWxIOError, e:
+                            logdbg("recoverable failure: %s" % e)
+                        time.sleep(10)
+            except weewx.WeeWxIOError, e:
+                pass
+            time.sleep(self.retry_wait)
 
 
-class WS3000Station(object):
+class WS3000Station(weeusb.USBHID):
     # usb values obtained from 'sudo lsusb -v'
     USB_ENDPOINT_IN = 0x82
     USB_ENDPOINT_OUT = 0x02
     USB_PACKET_SIZE = 0x40 # 64 bytes
 
-    def __init__():
-        super(USBHID, self).__init__(0x0483, 0x5750)
+    def __init__(self):
+        super(WS3000Station, self).__init__(0x0483, 0x5750)
 
-    def _write(self, buf):
+    def write(self, buf):
         logdbg("write: %s" % _fmt(buf))
-        cnt = self.devh.interruptWrite(
-            self.USB_ENDPOINT_OUT, buf, self.timeout)
-        if cnt != len(buf):
-            raise weewx.WeeWxIOError('write: bad write length: '
-                                     '%s != %s' % (cnt, len(buf)))
+        return self._write(buf)
 
-    def _read(self, timeout=None):
-        if timeout is None:
-            timeout = self.timeout
-        buf = self.devh.interruptRead(
-            self.USB_ENDPOINT_IN,
-            self.USB_PACKET_SIZE,
-            timeout)
+    def read(self, timeout=100):
+        buf = self._read(self.USB_PACKET_SIZE, self.USB_ENDPOINT_IN, timeout)
         if not buf:
             return None
         logdbg("read: %s" % _fmt(buf))
@@ -637,10 +530,10 @@ class WS3000Station(object):
         if idx is None:
             raise weewx.WeeWxIOError('read: no terminating bytes in buffer: '
                                      '%s' % _fmt(buf))
-        return buf[0: idx]
+        return buf[0: idx + 2]
 
     def send_cmd(self, cmd):
-        self._write([0x7b, cmd, 0x40, 0x7d])
+        self.write([0x7b, cmd, 0x40, 0x7d])
 
     def send_06(self):
         self.send_cmd(0x06)
@@ -673,7 +566,7 @@ class WS3000Station(object):
         self.send_41()
 
     def recv(self):
-        return self._read(timeout=100)
+        return self.read(timeout=100)
 
     @staticmethod
     def raw_to_pkt(buf):
@@ -700,35 +593,38 @@ class WS3000Station(object):
             pkt['type'] = 'alarm_humidity'
             for ch in range(8):
                 idx = 1 + ch * 2
-                pkt['hhi_%s' % ch] = buf[idx]
-                pkt['hlo_%s' % ch] = buf[idx + 1]
+                pkt['hhi_%s' % (ch + 1)] = buf[idx]
+                pkt['hlo_%s' % (ch + 1)] = buf[idx + 1]
         elif len(buf) == 35: # temperature alarm
             pkt['type'] = 'alarm_temperature'
             for ch in range(8):
                 idx = 1 + ch * 4
-                pkt['thi_%s' % ch] = (buf[idx] * 256 + buf[idx + 1]) / 10.0
-                pkt['tlo_%s' % ch] = (buf[idx + 2] * 256 + buf[idx + 3]) / 10.0
-        elif len(buf) == 27: # sensor calibration
-            pkt['type'] = 'sensor_calibration'
-            for ch in range(8):
-                idx = 1 + ch * 3
-                pkt['tc_%s' % ch] = (buf[idx] * 256 + buf[idx + 1]) / 10.0
-                pkt['hc_%s' % ch] = buf[idx + 2]
-        elif len(buf) == 27: # sensor values
-            pkt['type'] = 'sensor_values'
-            for ch in range(8):
-                idx = 1 + ch * 3
-                t = None
-                if buf[idx] != 0x7f and buf[idx + 1] != 0xff:
-                    t = (buf[idx] * 256 + buf[idx + 1]) / 10.0
-                pkt['t_%s' % ch] = t
-                h = None
-                if buf[idx + 2] != 0xff:
-                    h = buf[idx + 2]
-                pkt['h_%s' % ch] = h
+                pkt['thi_%s' % (ch + 1)] = (buf[idx] * 256 + buf[idx + 1]) / 10.0
+                pkt['tlo_%s' % (ch + 1)] = (buf[idx + 2] * 256 + buf[idx + 3]) / 10.0
+        elif len(buf) == 27: # sensor values or sensor calibration
+            # there is no way to distinguish between calibration and values.
+            # so we assume that none of the sensors have been calibrationed;
+            # a buffer with all zeros must thus be a calibration packet.
+            if buf[1: -2] == [0] * 24:
+                pkt['type'] = 'sensor_calibration'
+                for ch in range(8):
+                    idx = 1 + ch * 3
+                    pkt['tc_%s' % (ch + 1)] = (buf[idx] * 256 + buf[idx + 1]) / 10.0
+                    pkt['hc_%s' % (ch + 1)] = buf[idx + 2]
+            else:
+                pkt['type'] = 'sensor_values'
+                for ch in range(8):
+                    idx = 1 + ch * 3
+                    t = None
+                    if buf[idx] != 0x7f and buf[idx + 1] != 0xff:
+                        t = (buf[idx] * 256 + buf[idx + 1]) / 10.0
+                    pkt['t_%s' % (ch + 1)] = t
+                    h = None
+                    if buf[idx + 2] != 0xff:
+                        h = buf[idx + 2]
+                    pkt['h_%s' % (ch + 1)] = h
         else:
             logdbg("unknown data: %s" % _fmt(buf))
-        logdbg("pkt: %s" % pkt)
         return pkt
 
     @staticmethod
@@ -813,18 +709,22 @@ if __name__ == '__main__':
     if options.debug:
         syslog.setlogmask(syslog.LOG_UPTO(syslog.LOG_DEBUG))
 
-    with WS3000Station() as s:
-        queue = Queue.Queue()
-        t = WS3000Thread()
-        t.listen(s, queue)
-        while True:
-            try:
-                raw = queue.get(True, 10)
-                print "raw: %s" % raw
-                pkt = WS3000Station.raw_to_pkt(raw)
-                print "pkt: %s" % pkt
-            except Queue.Empty:
-                pass
-            except KeyboardInterrupt:
-                break
-        t.stop_listening()
+#    with WS3000Station() as s:
+#        while True:
+#            try:
+#                s.send_sequence()
+#                raw = s.recv()
+#                print "raw: %s" % _fmt(raw)
+#                pkt = WS3000Station.raw_to_pkt(raw)
+#                if len(raw) == 27:
+#                    print "pkt: %s" % pkt
+#            except weewx.WeeWxIOError, e:
+#                print "fail: %s" % e
+#            time.sleep(10)
+
+    driver = WS3000Driver()
+    try:
+        for p in driver.genLoopPackets():
+            print p
+    except:
+        driver.closePort()
