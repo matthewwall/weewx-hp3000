@@ -442,7 +442,9 @@ class WS3000Driver(weewx.drivers.AbstractDevice):
     def closePort(self):
         if self._thread:
             self._thread.running = False
-            self._thread.join()
+            self._thread.join(5)
+            if self._thread.isAlive():
+                loginf("data collection thread is still running")
             self._thread = None
 
     def hardware_name(self):
@@ -458,7 +460,7 @@ class WS3000Driver(weewx.drivers.AbstractDevice):
                     logdbg('packet: %s' % pkt)
                     yield pkt
             except Queue.Empty:
-                logdbg('empty queue')
+                pass
 
     def _data_to_packet(self, data):
         # map sensor data to database fields
@@ -474,26 +476,33 @@ class WS3000Thread(threading.Thread):
         threading.Thread.__init__(self)
         self.name = 'data-thread'
         self.queue = queue
+        self.retry_wait = 60 # seconds
         self.running = False
 
+    # FIXME: refactor the data collection loop, especially error handling
     def run(self):
         self.running = True
+        last_send = 0
         while self.running:
             try:
                 with WS3000Station() as s:
                     while self.running:
                         try:
-                            s.send_sequence() # FIXME: do this periodically
+                            now = time.time()
+                            if now - last_send > 30:
+                                s.send_sequence()
+                                last_send = now
                             raw = s.recv()
                             pkt = WS3000Station.raw_to_pkt(raw)
                             if pkt:
                                 self.queue.put(pkt)
+                            time.sleep(1)
                         except weewx.WeeWxIOError, e:
                             logdbg("recoverable failure: %s" % e)
-                        time.sleep(10)
+                            time.sleep(3)
             except weewx.WeeWxIOError, e:
-                pass
-            time.sleep(self.retry_wait)
+                loginf("fail: %s" % e)
+                time.sleep(self.retry_wait)
 
 
 class WS3000Station(weeusb.USBHID):
@@ -572,6 +581,8 @@ class WS3000Station(weeusb.USBHID):
     def raw_to_pkt(buf):
         logdbg("raw: %s" % _fmt(buf))
         pkt = dict()
+        if not buf:
+            return pkt
         if len(buf) == 4: # archive interval
             pkt['type'] = 'interval'
             pkt['interval'] = buf[1]
@@ -615,14 +626,10 @@ class WS3000Station(weeusb.USBHID):
                 pkt['type'] = 'sensor_values'
                 for ch in range(8):
                     idx = 1 + ch * 3
-                    t = None
                     if buf[idx] != 0x7f and buf[idx + 1] != 0xff:
-                        t = (buf[idx] * 256 + buf[idx + 1]) / 10.0
-                    pkt['t_%s' % (ch + 1)] = t
-                    h = None
+                        pkt['t_%s' % (ch + 1)] = (buf[idx] * 256 + buf[idx + 1]) / 10.0
                     if buf[idx + 2] != 0xff:
-                        h = buf[idx + 2]
-                    pkt['h_%s' % (ch + 1)] = h
+                        pkt['h_%s' % (ch + 1)] = buf[idx + 2]
         else:
             logdbg("unknown data: %s" % _fmt(buf))
         return pkt
@@ -720,11 +727,11 @@ if __name__ == '__main__':
 #                    print "pkt: %s" % pkt
 #            except weewx.WeeWxIOError, e:
 #                print "fail: %s" % e
-#            time.sleep(10)
+#            time.sleep(30)
 
     driver = WS3000Driver()
     try:
         for p in driver.genLoopPackets():
             print p
-    except:
+    finally:
         driver.closePort()
