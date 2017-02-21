@@ -1,3 +1,8 @@
+0.3 20feb2017
+* refactored so that ping happens every 30-ish seconds
+* assume all calibration values zero to distinguish data from calibration
+* explicit test support for either driver or direct to station
+
 0.2 22jan2017
 * user-specified map augments the default instead of replacing it
 

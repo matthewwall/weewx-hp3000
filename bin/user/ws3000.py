@@ -544,38 +544,43 @@ class WS3000Station(weeusb.USBHID):
     def send_cmd(self, cmd):
         self.write([0x7b, cmd, 0x40, 0x7d])
 
-    def send_06(self):
-        self.send_cmd(0x06)
-
-    def send_08(self):
-        self.send_cmd(0x08)
-
-    def send_09(self):
-        self.send_cmd(0x09)
-
-    def send_05(self):
-        self.send_cmd(0x05)
-
-    def send_03(self):
-        self.send_cmd(0x03)
-
-    def send_04(self):
-        self.send_cmd(0x04)
-
-    def send_41(self):
-        self.send_cmd(0x41)
-
     def send_sequence(self):
-        self.send_06()
-        self.send_08()
-        self.send_09()
-        self.send_05()
-        self.send_03()
-        self.send_04()
-        self.send_41()
+        self.send_cmd(0x06)
+        self.send_cmd(0x08)
+        self.send_cmd(0x09)
+        self.send_cmd(0x05)
+        self.send_cmd(0x03)
+        self.send_cmd(0x04)
+        self.send_cmd(0x41)
 
     def recv(self):
         return self.read(timeout=100)
+
+    GRAPH_TYPE = {
+        0: 'temperature',
+        1: 'humidity',
+        2: 'dewpoint',
+        3: 'heatindex'}
+    TIME_FORMAT = {
+        0: 'h:mm:ss',
+        1: 'AM h:mm:ss',
+        2: 'h:mm:ss AM'}
+    DATE_FORMAT = {
+        0: 'dd-mm-yyyy',
+        1: 'mm-dd-yyyy',
+        2: 'yyyy-mm-dd'}
+    DST = {
+        0: 'off',
+        1: 'on'}
+    UNITS = {
+        0: 'degree_C',
+        1: 'degree_F'}
+
+    @staticmethod
+    def decode_timezone(x):
+        if (x & 0xf0) == 0xf0:
+            return x - 0x100
+        return x
 
     @staticmethod
     def raw_to_pkt(buf):
@@ -588,13 +593,13 @@ class WS3000Station(weeusb.USBHID):
             pkt['interval'] = buf[1]
         elif len(buf) == 30: # configuration
             pkt['type'] = 'configuration'
-            pkt['graph_type'] = WS3000Station.decode_graph_type(buf[1])
+            pkt['graph_type'] = WS3000Station.GRAPH_TYPE.get(buf[1])
             pkt['graph_hours'] = buf[2]
-            pkt['time_format'] = WS3000Station.decode_time_format(buf[3])
-            pkt['date_format'] = WS3000Station.decode_date_format(buf[4])
-            pkt['dst'] = WS3000Station.decode_dst(buf[5])
+            pkt['time_format'] = WS3000Station.TIME_FORMAT.get(buf[3])
+            pkt['date_format'] = WS3000Station.DATE_FORMAT.get(buf[4])
+            pkt['dst'] = WS3000Station.DST.get(buf[5])
             pkt['timezone'] = WS3000Station.decode_timezone(buf[6])
-            pkt['units'] = WS3000Station.decode_units(buf[7])
+            pkt['units'] = WS3000Station.UNITS.get(buf[7])
             pkt['area1'] = buf[11]
             pkt['area2'] = buf[15]
             pkt['area3'] = buf[19]
@@ -634,60 +639,6 @@ class WS3000Station(weeusb.USBHID):
             logdbg("unknown data: %s" % _fmt(buf))
         return pkt
 
-    @staticmethod
-    def decode_graph_type(x):
-        if x == 0:
-            return 'temperature'
-        elif x == 1:
-            return 'humidity'
-        elif x == 2:
-            return 'dewpoint'
-        elif x == 3:
-            return 'heatindex'
-        return None
-
-    @staticmethod
-    def decode_time_format(x):
-        if x == 0:
-            return 'h:mm:ss'
-        elif x == 1:
-            return 'AM h:mm:ss'
-        elif x == 2:
-            return 'h:mm:ss AM'
-        return None
-
-    @staticmethod
-    def decode_date_format(x):
-        if x == 0:
-            return 'dd-mm-yyyy'
-        elif x == 1:
-            return 'mm-dd-yyyy'
-        elif x == 2:
-            return 'yyyy-mm-dd'
-        return None
-
-    @staticmethod
-    def decode_dst(x):
-        if x == 0:
-            return 'off'
-        elif x == 1:
-            return 'on'
-        return None
-
-    @staticmethod
-    def decode_timezone(x):
-        if (x & 0xf0) == 0xf0:
-            return x - 0x100
-        return x
-
-    @staticmethod
-    def decode_units(x):
-        if x == 0:
-            return 'degree_C'
-        elif x == 1:
-            return 'degree_F'
-        return None
-
 
 # define a main entry point for basic testing of the station.  invoke this as
 # follows from the weewx root dir:
@@ -703,10 +654,12 @@ if __name__ == '__main__':
     syslog.openlog('ws3000', syslog.LOG_PID | syslog.LOG_CONS)
     syslog.setlogmask(syslog.LOG_UPTO(syslog.LOG_INFO))
     parser = optparse.OptionParser(usage=usage)
-    parser.add_option('--version', dest='version', action='store_true',
+    parser.add_option('--version', action='store_true',
                       help='display driver version')
-    parser.add_option('--debug', dest='debug', action='store_true',
+    parser.add_option('--debug', action='store_true',
                       help='display diagnostic information while running')
+    parser.add_option('--test', default='station',
+                      help='what to test: station or driver')
     (options, args) = parser.parse_args()
 
     if options.version:
@@ -716,22 +669,26 @@ if __name__ == '__main__':
     if options.debug:
         syslog.setlogmask(syslog.LOG_UPTO(syslog.LOG_DEBUG))
 
-#    with WS3000Station() as s:
-#        while True:
-#            try:
-#                s.send_sequence()
-#                raw = s.recv()
-#                print "raw: %s" % _fmt(raw)
-#                pkt = WS3000Station.raw_to_pkt(raw)
-#                if len(raw) == 27:
-#                    print "pkt: %s" % pkt
-#            except weewx.WeeWxIOError, e:
-#                print "fail: %s" % e
-#            time.sleep(30)
-
-    driver = WS3000Driver()
-    try:
-        for p in driver.genLoopPackets():
-            print p
-    finally:
-        driver.closePort()
+    if options.test == 'driver':
+        driver = WS3000Driver()
+        try:
+            for p in driver.genLoopPackets():
+                print p
+        finally:
+            driver.closePort()
+    else:
+        with WS3000Station() as s:
+            last_ping = 0
+            while True:
+                try:
+                    now = time.time()
+                    if now - last_ping > 30:
+                        s.send_sequence()
+                        last_ping = now
+                    raw = s.recv()
+                    print "raw: %s" % _fmt(raw)
+                    pkt = WS3000Station.raw_to_pkt(raw)
+                    print "pkt: %s" % pkt
+                except weewx.WeeWxIOError, e:
+                    print "fail: %s" % e
+                time.sleep(1)
