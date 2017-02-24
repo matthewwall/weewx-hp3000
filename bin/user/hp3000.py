@@ -3,12 +3,12 @@
 # Distributed under the terms of the GNU Public License (GPLv3)
 
 """
-Collect data from the WS-3000 console via USB.
+Collect data from the HP-3000 console via USB.
 
   Ambient Weather WS-3000-X5
   Ambient Weather WS-3000-X3
 
-The WS-3000 supports up to 8 remote temperature/humidity sensors.  The console
+The HP-3000 supports up to 8 remote temperature/humidity sensors.  The console
 has a 3"x4" TFT color display, with graph and room for 5 sensor displays.  The
 sensor display regions can cycle through different sensors when more than 5
 sensors are connected.
@@ -357,18 +357,18 @@ import time
 import weeusb
 import weewx.drivers
 
-DRIVER_NAME = 'WS3000'
+DRIVER_NAME = 'HP3000'
 DRIVER_VERSION = '0.3'
 
 def loader(config_dict, _):
-    return WS3000Driver(**config_dict[DRIVER_NAME])
+    return HP3000Driver(**config_dict[DRIVER_NAME])
 
 def confeditor_loader():
-    return WS3000ConfigurationEditor()
+    return HP3000ConfigurationEditor()
 
 
 def logmsg(level, msg):
-    syslog.syslog(level, 'ws3000: %s' % msg)
+    syslog.syslog(level, 'hp3000: %s' % msg)
 
 def logdbg(msg):
     logmsg(syslog.LOG_DEBUG, msg)
@@ -386,22 +386,22 @@ def _fmt(buf):
     return ''
 
 
-class WS3000ConfigurationEditor(weewx.drivers.AbstractConfEditor):
+class HP3000ConfigurationEditor(weewx.drivers.AbstractConfEditor):
     @property
     def default_stanza(self):
         return """
-[WS3000]
-    # This section is for WS-3000 sensors
+[HP3000]
+    # This section is for HP-3000 temperature/humidity sensors
 
     # The model name such as Ambient WS-3000-X5
-    model = WS3000
+    model = WS-3000
 
     # The driver to use
-    driver = user.ws3000
+    driver = user.hp3000
 """
 
 
-class WS3000Driver(weewx.drivers.AbstractDevice):
+class HP3000Driver(weewx.drivers.AbstractDevice):
 
     DEFAULT_MAP = {
         'inTemp': 't_1',
@@ -424,15 +424,15 @@ class WS3000Driver(weewx.drivers.AbstractDevice):
     def __init__(self, **stn_dict):
         loginf('driver version is %s' % DRIVER_VERSION)
         loginf('usb info: %s' % weeusb.USBHID.get_usb_info())
-        self._model = stn_dict.get('model', 'WS3000')
+        self._model = stn_dict.get('model', 'HP3000')
         self._max_tries = int(stn_dict.get('max_tries', 5))
         self._retry_wait = int(stn_dict.get('retry_wait', 3))
         self._ping_interval = int(stn_dict.get('ping_interval', 30))
-        self._sensor_map = dict(WS3000Driver.DEFAULT_MAP)
+        self._sensor_map = dict(HP3000Driver.DEFAULT_MAP)
         if 'sensor_map' in stn_dict:
             self._sensor_map.update(stn_dict['sensor_map'])
         loginf('sensor map: %s' % self._sensor_map)
-        self._station = WS3000Station()
+        self._station = HP3000Station()
         self._station.open()
 
     def closePort(self):
@@ -453,7 +453,7 @@ class WS3000Driver(weewx.drivers.AbstractDevice):
                     last_send = now
                 raw = self._station.recv()
                 cnt = 0
-                data = WS3000Station.raw_to_pkt(raw)
+                data = HP3000Station.raw_to_pkt(raw)
                 logdbg('data: %s' % data)
                 if data and data.get('type') == 'sensor_values':
                     pkt = self._data_to_packet(data)
@@ -479,14 +479,14 @@ class WS3000Driver(weewx.drivers.AbstractDevice):
         return pkt
 
 
-class WS3000Station(weeusb.USBHID):
+class HP3000Station(weeusb.USBHID):
     # usb values obtained from 'sudo lsusb -v'
     USB_ENDPOINT_IN = 0x82
     USB_ENDPOINT_OUT = 0x02
     USB_PACKET_SIZE = 0x40 # 64 bytes
 
     def __init__(self):
-        super(WS3000Station, self).__init__(0x0483, 0x5750)
+        super(HP3000Station, self).__init__(0x0483, 0x5750)
 
     def write(self, buf):
         logdbg("write: %s" % _fmt(buf))
@@ -567,13 +567,13 @@ class WS3000Station(weeusb.USBHID):
             pkt['interval'] = buf[1]
         elif len(buf) == 30: # configuration
             pkt['type'] = 'configuration'
-            pkt['graph_type'] = WS3000Station.GRAPH_TYPE.get(buf[1])
+            pkt['graph_type'] = HP3000Station.GRAPH_TYPE.get(buf[1])
             pkt['graph_hours'] = buf[2]
-            pkt['time_format'] = WS3000Station.TIME_FORMAT.get(buf[3])
-            pkt['date_format'] = WS3000Station.DATE_FORMAT.get(buf[4])
-            pkt['dst'] = WS3000Station.DST.get(buf[5])
-            pkt['timezone'] = WS3000Station.decode_timezone(buf[6])
-            pkt['units'] = WS3000Station.UNITS.get(buf[7])
+            pkt['time_format'] = HP3000Station.TIME_FORMAT.get(buf[3])
+            pkt['date_format'] = HP3000Station.DATE_FORMAT.get(buf[4])
+            pkt['dst'] = HP3000Station.DST.get(buf[5])
+            pkt['timezone'] = HP3000Station.decode_timezone(buf[6])
+            pkt['units'] = HP3000Station.UNITS.get(buf[7])
             pkt['area1'] = buf[11]
             pkt['area2'] = buf[15]
             pkt['area3'] = buf[19]
@@ -617,7 +617,7 @@ class WS3000Station(weeusb.USBHID):
 # define a main entry point for basic testing of the station.  invoke this as
 # follows from the weewx root dir:
 #
-# PYTHONPATH=bin python bin/user/ws3000.py
+# PYTHONPATH=bin python bin/user/hp3000.py
 
 if __name__ == '__main__':
 
@@ -625,7 +625,7 @@ if __name__ == '__main__':
 
     usage = """%prog [options] [--debug] [--help]"""
 
-    syslog.openlog('ws3000', syslog.LOG_PID | syslog.LOG_CONS)
+    syslog.openlog('hp3000', syslog.LOG_PID | syslog.LOG_CONS)
     syslog.setlogmask(syslog.LOG_UPTO(syslog.LOG_INFO))
     parser = optparse.OptionParser(usage=usage)
     parser.add_option('--version', action='store_true',
@@ -644,14 +644,14 @@ if __name__ == '__main__':
         syslog.setlogmask(syslog.LOG_UPTO(syslog.LOG_DEBUG))
 
     if options.test == 'driver':
-        driver = WS3000Driver()
+        driver = HP3000Driver()
         try:
             for p in driver.genLoopPackets():
                 print p
         finally:
             driver.closePort()
     else:
-        with WS3000Station() as s:
+        with HP3000Station() as s:
             last_ping = 0
             while True:
                 try:
@@ -661,7 +661,7 @@ if __name__ == '__main__':
                         last_ping = now
                     raw = s.recv()
                     print "raw: %s" % _fmt(raw)
-                    pkt = WS3000Station.raw_to_pkt(raw)
+                    pkt = HP3000Station.raw_to_pkt(raw)
                     print "pkt: %s" % pkt
                 except weewx.WeeWxIOError, e:
                     print "fail: %s" % e
