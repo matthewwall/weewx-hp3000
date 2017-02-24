@@ -32,18 +32,18 @@ installed, no data are retained.
 
 Each sensor has its own display of temperature and humidity.
 
-Each sensor is idenfified by channel number.  The channel number is set using
+Each sensor is identified by channel number.  The channel number is set using
 DIP switches on each sensor.  The DIP switches also determine which units will
 be displayed in each sensor.
 
 There are 4 two-position DIP switches.  DIP 4 determines units: 0=F 1=C
 DIP 1-3 determine which of 8 channels is selected.
 
-Data from sensors is received every 60 seconds.
-
 Each sensor uses 2 AA batteries.  Nominal battery life is 1 year.
 
 The console uses 5V DC from an AC/DC transformer.
+
+Data from sensors are received every 60 seconds.
 
 Dewpoint and heatindex are calculated within the console.
 
@@ -58,8 +58,8 @@ The console has a radio controlled clock.  During RCC reception, no data will
 be transmitted.  If no RCC is received, attempt will be made every two hours
 until successful.
 
-This driver was developed without any assistance from Ambient Weather or the
-actual manufacter of the WS-3000 hardware.
+This driver was developed without any assistance from Ambient Weather (the
+vendor) or Fine Offset (the manufacturer).
 
 ===============================================================================
 Messages from console
@@ -73,7 +73,6 @@ Many of the console messages correspond with the control messages sent from
 the host.
 
 configuration state (30 bytes)
-
 00 7b
 01 00 graph type
 02 48 graph hours
@@ -106,14 +105,12 @@ configuration state (30 bytes)
 1d 7d
 
 interval (4 bytes)
-
 00 7b
 01 05 interval in minutes
 02 40
 03 7d
 
 unknown (9 bytes)
-
 00 7b
 01 01
 02 01
@@ -125,7 +122,6 @@ unknown (9 bytes)
 08 7d
 
 current data (27 bytes)
-
 00 7b
 01 00 ch1 temp MSB
 02 eb ch1 temp LSB    t1 = (MSB * 256 + LSB) / 10.0
@@ -155,7 +151,6 @@ current data (27 bytes)
 1a 7d
 
 calibration (27 bytes)
-
 00 7b
 01 00 ch1 temp MSB
 02 00 ch1 temp LSB    tcal1 = (MSB * 256 + LSB) / 10.0
@@ -185,7 +180,6 @@ calibration (27 bytes)
 1a 7d
 
 humidity alarm configuration (19 bytes)
-
 00 7b
 01 5a ch1 hi    0x5a = 90 %
 02 14 ch1 lo    0x14 = 20 %
@@ -207,7 +201,6 @@ humidity alarm configuration (19 bytes)
 1b 7d
 
 temperature alarm configuration (35 bytes)
-
 00 7b
 01 01 ch1 hi  (0x01*256 + 0x2c) / 10.0 = 30.0 C
 02 2c
@@ -247,7 +240,10 @@ temperature alarm configuration (35 bytes)
 ===============================================================================
 Messages to console
 
-The host sends a sequence of what appear to be empty commands:
+Each command buffer is terminated by the bytes 0x40 0x7d.
+
+The host sends a sequence of what appear to be empty commands, approximately
+every 30 seconds:
 
 7b 06 40 7d
 7b 08 40 7d
@@ -257,7 +253,7 @@ The host sends a sequence of what appear to be empty commands:
 7b 04 40 7d
 7b 41 40 7d
 
-The buffer termination is 0x40 0x7d.
+Other commands are sent when a specific action is performed in the software:
 
 set configuration command (0x10)
 00 7b
@@ -356,7 +352,6 @@ set interval command (0x40)
 from __future__ import with_statement
 import Queue
 import syslog
-import threading
 import time
 
 import weeusb
@@ -373,8 +368,7 @@ def confeditor_loader():
 
 
 def logmsg(level, msg):
-    syslog.syslog(level, 'ws3000: %s: %s' %
-                  (threading.currentThread().getName(), msg))
+    syslog.syslog(level, 'ws3000: %s' % msg)
 
 def logdbg(msg):
     logmsg(syslog.LOG_DEBUG, msg)
@@ -431,36 +425,50 @@ class WS3000Driver(weewx.drivers.AbstractDevice):
         loginf('driver version is %s' % DRIVER_VERSION)
         loginf('usb info: %s' % weeusb.USBHID.get_usb_info())
         self._model = stn_dict.get('model', 'WS3000')
+        self._max_tries = int(stn_dict.get('max_tries', 5))
+        self._retry_wait = int(stn_dict.get('retry_wait', 3))
+        self._ping_interval = int(stn_dict.get('ping_interval', 30))
         self._sensor_map = dict(WS3000Driver.DEFAULT_MAP)
         if 'sensor_map' in stn_dict:
             self._sensor_map.update(stn_dict['sensor_map'])
         loginf('sensor map: %s' % self._sensor_map)
-        self._queue = Queue.Queue()
-        self._thread = WS3000Thread(self._queue)
-        self._thread.start()
+        self._station = WS3000Station()
+        self._station.open()
 
     def closePort(self):
-        if self._thread:
-            self._thread.running = False
-            self._thread.join(5)
-            if self._thread.isAlive():
-                loginf("data collection thread is still running")
-            self._thread = None
+        self._station.close()
 
     def hardware_name(self):
         return self._model
 
     def genLoopPackets(self):
-        while True:
+        cnt = 0
+        last_send = 0
+        while cnt < self._max_tries:
+            cnt += 1
             try:
-                data = self._queue.get(True, 10)
+                now = time.time()
+                if now - last_send > self._ping_interval:
+                    self._station.send_sequence()
+                    last_send = now
+                raw = self._station.recv()
+                cnt = 0
+                data = WS3000Station.raw_to_pkt(raw)
                 logdbg('data: %s' % data)
-                if data.get('type') == 'sensor_values':
+                if data and data.get('type') == 'sensor_values':
                     pkt = self._data_to_packet(data)
                     logdbg('packet: %s' % pkt)
                     yield pkt
-            except Queue.Empty:
-                pass
+                time.sleep(1)
+            except weewx.WeeWxIOError, e:
+                loginf("Failed attempt %d of %d: %s" %
+                       (cnt, self._max_tries, e))
+                logdbg("Waiting %d seconds before retry" % self._retry_wait)
+                time.sleep(self._retry_wait)
+        else:
+            msg = "Max retries (%d) exceeded" % self._max_tries
+            logerr(msg)
+            raise weewx.RetriesExceeded(msg)
 
     def _data_to_packet(self, data):
         # map sensor data to database fields
@@ -469,40 +477,6 @@ class WS3000Driver(weewx.drivers.AbstractDevice):
             if self._sensor_map[x] in data:
                 pkt[x] = data[self._sensor_map[x]]
         return pkt
-
-
-class WS3000Thread(threading.Thread):
-    def __init__(self, queue):
-        threading.Thread.__init__(self)
-        self.name = 'data-thread'
-        self.queue = queue
-        self.retry_wait = 60 # seconds
-        self.running = False
-
-    # FIXME: refactor the data collection loop, especially error handling
-    def run(self):
-        self.running = True
-        last_send = 0
-        while self.running:
-            try:
-                with WS3000Station() as s:
-                    while self.running:
-                        try:
-                            now = time.time()
-                            if now - last_send > 30:
-                                s.send_sequence()
-                                last_send = now
-                            raw = s.recv()
-                            pkt = WS3000Station.raw_to_pkt(raw)
-                            if pkt:
-                                self.queue.put(pkt)
-                            time.sleep(1)
-                        except weewx.WeeWxIOError, e:
-                            logdbg("recoverable failure: %s" % e)
-                            time.sleep(3)
-            except weewx.WeeWxIOError, e:
-                loginf("fail: %s" % e)
-                time.sleep(self.retry_wait)
 
 
 class WS3000Station(weeusb.USBHID):
