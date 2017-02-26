@@ -350,7 +350,6 @@ set interval command (0x40)
 # FIXME: verify encoding of negative timezone offsets
 
 from __future__ import with_statement
-import Queue
 import syslog
 import time
 
@@ -358,7 +357,7 @@ import weeusb
 import weewx.drivers
 
 DRIVER_NAME = 'HP3000'
-DRIVER_VERSION = '0.3'
+DRIVER_VERSION = '0.5'
 
 def loader(config_dict, _):
     return HP3000Driver(**config_dict[DRIVER_NAME])
@@ -498,21 +497,19 @@ class HP3000Station(weeusb.USBHID):
             return None
         logdbg("read: %s" % _fmt(buf))
         if len(buf) != 64:
-            raise weewx.WeeWxIOError('read: bad buffer length: '
-                                     '%s != 64' % len(buf))
+            logdbg('read: bad buffer length: %s != 64' % len(buf))
+            return None
         if buf[0] != 0x7b:
-            raise weewx.WeeWxIOError('read: bad first byte: '
-                                     '0x%02x != 0x7b' % buf[0])
+            logdbg('read: bad first byte: 0x%02x != 0x7b' % buf[0])
+            return None
         idx = None
-        try:
-            i = buf.index(0x40)
-            if buf[i + 1] == 0x7d:
+        for i in range(0, len(buf) - 1):
+            if buf[i] == 0x40 and buf[i + 1] == 0x7d:
                 idx = i
-        except ValueError, IndexError:
-            pass
+                break
         if idx is None:
-            raise weewx.WeeWxIOError('read: no terminating bytes in buffer: '
-                                     '%s' % _fmt(buf))
+            logdbg('read: no terminating bytes in buffer: %s' % _fmt(buf))
+            return None
         return buf[0: idx + 2]
 
     def send_cmd(self, cmd):
