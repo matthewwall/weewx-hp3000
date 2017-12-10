@@ -1,3 +1,6 @@
+0.6 10dec2017
+* hardware_name is a property
+
 0.5 25feb2017
 * better check for terminating bytes
 * log bogus packets instead of counting them as IO failures

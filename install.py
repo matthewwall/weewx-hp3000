@@ -10,7 +10,7 @@ def loader():
 class HP3000Installer(ExtensionInstaller):
     def __init__(self):
         super(HP3000Installer, self).__init__(
-            version="0.5",
+            version="0.6",
             name='hp3000',
             description='Collect data from HP-3000 temperature/humidity sensors',
             author="Matthew Wall",

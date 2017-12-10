@@ -357,7 +357,7 @@ import weeusb
 import weewx.drivers
 
 DRIVER_NAME = 'HP3000'
-DRIVER_VERSION = '0.5'
+DRIVER_VERSION = '0.6'
 
 def loader(config_dict, _):
     return HP3000Driver(**config_dict[DRIVER_NAME])
@@ -437,6 +437,7 @@ class HP3000Driver(weewx.drivers.AbstractDevice):
     def closePort(self):
         self._station.close()
 
+    @property
     def hardware_name(self):
         return self._model
 
