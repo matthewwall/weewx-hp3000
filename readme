@@ -1,4 +1,6 @@
 weewx-hp3000
+Copyright 2016 Matthew Wall
+Distributed under terms of the GPLv3
 
 This is a driver for weewx that collects data from HP-3000 temperature/humidity
 sensors.  The HP-3000 is a small console that receives data wirelessly from up
